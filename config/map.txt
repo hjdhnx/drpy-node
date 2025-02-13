@@ -1,3 +1,4 @@
+哔哩收藏[官]@?render=1&type=url&params=../json/哔哩收藏.json@哔哩收藏[官]
 我的哔哩[官]@?render=1&type=url&params=../json/哔哩教育.json@哔哩教育[官]
 我的哔哩[官]@?render=1&type=url&params=../json/哔哩大全.json@哔哩大全[官]
 我的哔哩[官]@?render=1&type=url&params=../json/哔哩大杂烩.json@哔哩大杂烩[官]
