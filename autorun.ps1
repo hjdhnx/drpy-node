@@ -15,10 +15,9 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     exit
 }
 
-# ----------- 切回脚本目录 -----------
 Set-Location -LiteralPath $PSScriptRoot
 
-# ---------- 代理开关 ----------
+# ---------- 代理 ----------
 function Use-ProxyIfNeeded {
     param([scriptblock]$Script)
     if ($UseProxy) {
@@ -26,21 +25,16 @@ function Use-ProxyIfNeeded {
         $oldHttps = [Environment]::GetEnvironmentVariable("HTTPS_PROXY")
         [Environment]::SetEnvironmentVariable("HTTP_PROXY",  "http://$ProxyHost", "Process")
         [Environment]::SetEnvironmentVariable("HTTPS_PROXY", "http://$ProxyHost", "Process")
-        try { & $Script }
-        finally {
+        try { & $Script } finally {
             [Environment]::SetEnvironmentVariable("HTTP_PROXY",  $oldHttp,  "Process")
             [Environment]::SetEnvironmentVariable("HTTPS_PROXY", $oldHttps, "Process")
         }
     } else { & $Script }
 }
-
 function Test-Cmd { param($cmd); $null -ne (Get-Command $cmd -ErrorAction SilentlyContinue) }
 function Invoke-WebRequestWithProxy([string]$Url, [string]$OutFile) {
-    if ($UseProxy) {
-        Invoke-WebRequest $Url -OutFile $OutFile -Proxy "http://$ProxyHost"
-    } else {
-        Invoke-WebRequest $Url -OutFile $OutFile
-    }
+    if ($UseProxy) { Invoke-WebRequest $Url -OutFile $OutFile -Proxy "http://$ProxyHost" }
+    else           { Invoke-WebRequest $Url -OutFile $OutFile }
 }
 
 # ---------- 用户确认 ----------
@@ -48,7 +42,7 @@ if (-not $SkipConfirm) {
     Write-Host "警告：此脚本仅适用于 Windows 10/11 64 位" -ForegroundColor Green
     Write-Host "建议使用 Windows Terminal 终端管理员方式运行" -ForegroundColor Green
     Write-Host "如果 nvm、git、python 安装失败，建议手动安装" -ForegroundColor Green
-    Write-Host "下载失败可指定旁路由代理：.\autorun.ps1 -UseProxy -ProxyHost `"192.168.1.21:7890`"" -ForegroundColor Green
+    Write-Host "下载失败可指定旁路由代理：.\drpys-final.ps1 -UseProxy -ProxyHost `"192.168.1.21:7890`"" -ForegroundColor Green
     Write-Host "如果旁路由也下载失败那就换成道长那个白嫖地址" -ForegroundColor Green
     $confirm = Read-Host "您是否理解并同意继续？(y/n) 默认(y)"
     if ($confirm -eq "n") { exit 1 }
@@ -92,7 +86,6 @@ Use-ProxyIfNeeded -Script {
         git    = { winget install --id Git.Git -e --source winget }
         python = { winget install --id Python.Python.3 -e --source winget }
     }
-
     foreach ($kv in $tools.GetEnumerator()) {
         $cmd = $kv.Key
         if (-not (Test-Cmd $cmd)) {
@@ -102,7 +95,6 @@ Use-ProxyIfNeeded -Script {
             Write-Host "已检测到 $cmd，跳过安装" -ForegroundColor Green
         }
     }
-
     $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 }
 
@@ -124,7 +116,6 @@ Use-ProxyIfNeeded -Script {
     }
     Set-Location $projectPath
 
-    # 初始化配置
     $configJson = "config\env.json"
     if (-not (Test-Path $configJson)) {
         @{
@@ -149,7 +140,6 @@ Use-ProxyIfNeeded -Script {
             Set-Content $envFile -Encoding UTF8
     }
 
-    # 首次安装依赖
     if (-not (Test-Path "node_modules")) {
         Write-Host "首次安装 Node 依赖..." -ForegroundColor Yellow
         yarn config set registry https://registry.npmmirror.com/
@@ -165,7 +155,6 @@ Use-ProxyIfNeeded -Script {
         pip install -r spider\py\base\requirements.txt -i https://mirrors.cloud.tencent.com/pypi/simple
     }
 
-    # 首次或 PM2 未启动时启动
     if (-not (pm2 list | Select-String "drpyS.*online")) {
         Write-Host "首次启动 PM2 进程..." -ForegroundColor Yellow
         pm2 start index.js --name drpyS --update-env
@@ -179,24 +168,44 @@ Use-ProxyIfNeeded -Script {
 $taskStartup = "drpyS_PM2_Startup"
 $taskUpdate  = "drpyS_Update"
 
-if (-not (Get-ScheduledTask -TaskName $taskStartup -ErrorAction SilentlyContinue)) {
-    $action  = New-ScheduledTaskAction -Execute "powershell.exe" `
-                -Argument "-NoProfile -WindowStyle Hidden -Command pm2 resurrect"
-    $trigger = New-ScheduledTaskTrigger -AtStartup -RandomDelay (New-TimeSpan -Seconds 30)
-    $setting = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
-    Register-ScheduledTask -TaskName $taskStartup -Action $action -Trigger $trigger `
-        -Settings $setting -User "SYSTEM" -RunLevel Highest -Force | Out-Null
-    Write-Host "已创建开机自启任务：$taskStartup" -ForegroundColor Yellow
-}
+# 获取绝对路径
+$pm2     = (Get-Command pm2.cmd  -ErrorAction SilentlyContinue).Source
+$nodeExe = (Get-Command node.exe -ErrorAction SilentlyContinue).Source
 
-if (-not (Get-ScheduledTask -TaskName $taskUpdate -ErrorAction SilentlyContinue)) {
-    $action  = New-ScheduledTaskAction -Execute "powershell.exe" `
-                -Argument "-NoProfile -WindowStyle Hidden -Command `"& { cd '$projectPath'; git fetch origin; if (git status -uno | Select-String 'Your branch is behind') { git reset --hard origin/main; yarn --prod --silent; if (git diff HEAD^ HEAD --name-only | Select-String 'spider/py/base/requirements.txt') { python -m venv .venv; & .\.venv\Scripts\Activate.ps1; pip install -r spider\py\base\requirements.txt -q } pm2 restart drpyS } }`""
+if (-not $pm2 -or -not $nodeExe) {
+    Write-Warning "找不到 pm2.cmd 或 node.exe，跳过计划任务注册"
+} else {
+    # 删除旧任务
+    $taskStartup,$taskUpdate | ForEach-Object {
+        if (Get-ScheduledTask -TaskName $_ -ErrorAction SilentlyContinue) {
+            Unregister-ScheduledTask -TaskName $_ -Confirm:$false
+        }
+    }
+
+    $commonSettings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+
+    # 1) 开机自启（直接启动 drpyS，不依赖 dump）
+    $action  = New-ScheduledTaskAction `
+        -Execute "powershell.exe" `
+        -Argument "-NoProfile -ExecutionPolicy Bypass -Command `"& { Set-Location '$projectPath'; & '$nodeExe' '$projectPath\index.js' | & '$pm2' start '$projectPath\index.js' --name drpyS --update-env }`"" `
+        -WorkingDirectory $projectPath
+    $trigger = New-ScheduledTaskTrigger -AtStartup -RandomDelay (New-TimeSpan -Seconds 30)
+    Register-ScheduledTask -TaskName $taskStartup `
+        -Action $action -Trigger $trigger -Settings $commonSettings `
+        -User "SYSTEM" -RunLevel Highest -Force | Out-Null
+    Write-Host "已创建/更新开机自启任务：$taskStartup" -ForegroundColor Yellow
+
+    # 2) 每 24 h 更新
+    $action  = New-ScheduledTaskAction `
+        -Execute "powershell.exe" `
+        -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command `"& { Set-Location '$projectPath'; git fetch origin; if (git status -uno | Select-String 'Your branch is behind') { git reset --hard origin/main; yarn --prod --silent; if (git diff HEAD^ HEAD --name-only | Select-String 'spider/py/base/requirements.txt') { python -m venv .venv; & .\.venv\Scripts\Activate.ps1; pip install -r spider\py\base\requirements.txt -q } & '$pm2' restart drpyS } }`"" `
+        -WorkingDirectory $projectPath
     $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Hours 24)
-    $setting = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
-    Register-ScheduledTask -TaskName $taskUpdate -Action $action -Trigger $trigger `
-        -Settings $setting -User "SYSTEM" -RunLevel Highest -Force | Out-Null
-    Write-Host "已创建每 24 小时更新任务：$taskUpdate" -ForegroundColor Yellow
+    Register-ScheduledTask -TaskName $taskUpdate `
+        -Action $action -Trigger $trigger -Settings $commonSettings `
+        -User "SYSTEM" -RunLevel Highest -Force | Out-Null
+    Write-Host "已创建/更新每 24 小时更新任务：$taskUpdate" -ForegroundColor Yellow
 }
 
 # ---------- 完成 ----------
@@ -206,5 +215,5 @@ Write-Host "内网地址：http://${ip}:5757" -ForegroundColor Yellow
 Write-Host "公网地址：http://${public}:5757" -ForegroundColor Yellow
 Write-Host "脚本执行完成！重启后 drpyS 自动启动并每 24 小时检查更新。" -ForegroundColor Yellow
 Write-Host "脚本只需要执行一次，无需重复执行。" -ForegroundColor Yellow
-Write-Host "按任意键退出..." -ForegroundColor Green
+Write-Host "按任意键退出！！！" -ForegroundColor Yellow
 Read-Host
